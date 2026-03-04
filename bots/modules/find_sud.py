@@ -1,6 +1,4 @@
 import json
-import os
-from pathlib import Path
 import re
 import tkinter as tk
 from dataclasses import dataclass
@@ -11,14 +9,8 @@ from tkinter import filedialog, messagebox, ttk
 
 import pandas as pd
 
-# Local validator/cleaner for courts_merged.json
-try:
-    from courts_cleaner import validate_and_clean_courts
-except Exception:
-    validate_and_clean_courts = None  # type: ignore
-
 # ===================== НАСТРОЙКИ =====================
-COURTS_JSON_PATH = str(Path(__file__).resolve().parent / 'courts_merged.json')
+COURTS_JSON_PATH = "./courts_merged.json"
 
 TH_TAKE_LOCAL = 2.6
 TH_TAKE_GLOBAL = 3.4
@@ -27,31 +19,30 @@ TH_REGION_FROM_PLACE = 0.55
 # Excel: какой столбец адреса искать
 ADDRESS_COL_PRIMARY = "Адрес"
 ADDRESS_COL_ALIASES = {
-    "адрес", "адрес проживания", "адрес регистрации", "адрес объекта",
-    "место жительства", "местожительства"
+    "адрес", "адрес проживания", "адрес регистрации", "адрес объекта", "место жительства", "местожительства"
 }
 
-# Принудительный выбор суда по "якорям" в адресе: (court_name, region)
-FORCED_COURT_BY_ANCHOR: dict[str, tuple[str, str]] = {
-    "ордабас": ("Ордабасинский районный суд Туркестанской области", "Туркестанская область"),
-    "ордабасы": ("Ордабасинский районный суд Туркестанской области", "Туркестанская область"),
-    "ordabasy": ("Ордабасинский районный суд Туркестанской области", "Туркестанская область"),
 
-    "текели": ("Текелийский городской суд области Жетісу", "Область Жетісу"),
-    "tekeli": ("Текелийский городской суд области Жетісu".replace("Жетісu", "Жетісу"), "Область Жетісу"),
+FORCED_COURT_BY_ANCHOR = {
+    "ордабас": "Ордабасинский районный суд Туркестанской области",
+    "ордабасы": "Ордабасинский районный суд Туркестанской области",
+    "ordabasy": "Ордабасинский районный суд Туркестанской области",
 
-    "талдыкорган": ("Талдыкорганский городской суд области Жетісу", "Область Жетісу"),
-    "taldykorgan": ("Талдыкорганский городской суд области Жетісу", "Область Жетісу"),
+    "текели": "Текелийский городской суд области Жетісу",
+    "tekeli": "Текелийский городской суд области Жетісу",
 
-    "тюлькубас": ("Тюлькубасский районный суд Туркестанской области", "Туркестанская область"),
-    "түлкібас": ("Тюлькубасский районный суд Туркестанской области", "Туркестанская область"),
-    "tulkibas": ("Тюлькубасский районный суд Туркестанской области", "Туркестанская область"),
+    "талдыкорган": "Талдыкорганский городской суд области Жетісу",
+    "taldykorgan": "Талдыкорганский городской суд области Жетісу",
 
-    "махтаарал": ("Мактааральский районный суд Туркестанской области", "Туркестанская область"),
-    "мактаарал": ("Мактааральский районный суд Туркестанской области", "Туркестанская область"),
-    "мақтаарал": ("Мактааральский районный суд Туркестанской области", "Туркестанская область"),
-    "maktaaral": ("Мактааральский районный суд Туркестанской области", "Туркестанская область"),
-    "mahtaaral": ("Мактааральский районный суд Туркестанской области", "Туркестанская область"),
+    "тюлькубас": "Тюлькубасский районный суд Туркестанской области",
+    "түлкібас": "Тюлькубасский районный суд Туркестанской области",
+    "tulkibas": "Тюлькубасский районный суд Туркестанской области",
+
+    "махтаарал": "Мактааральский районный суд Туркестанской области",
+    "мактаарал": "Мактааральский районный суд Туркестанской области",
+    "мақтаарал": "Мактааральский районный суд Туркестанской области",
+    "maktaaral": "Мактааральский районный суд Туркестанской области",
+    "mahtaaral": "Мактааральский районный суд Туркестанской области",
 }
 
 # ===================== НОРМАЛИЗАЦИЯ / СЛОВАРИ =====================
@@ -73,6 +64,7 @@ PLACE_ALIASES = {
     "қапшағай": "қонаев",
 }
 
+# РЕГИОН по якорям (оставляем как было, но Ордабасы тут можно оставить для региона)
 REGION_ANCHORS = {
     "зко": "ЗКО",
     "з-казахстан": "ЗКО",
@@ -125,7 +117,7 @@ REGION_ANCHORS = {
 
     "талдыкорган": "Область Жетісу",
     "taldykorgan": "Область Жетісу",
-    "тaлдыкорган": "Область Жетісу",
+    "тaлдыкорган": "Область Жетісу",    
 
     "тюлькубас": "Туркестанская область",
     "түлкібас": "Туркестанская область",
@@ -136,6 +128,7 @@ REGION_ANCHORS = {
     "мақтаарал": "Туркестанская область",
     "maktaaral": "Туркестанская область",
     "mahtaaral": "Туркестанская область",
+
 }
 
 REGION_CANON = {
@@ -148,14 +141,11 @@ REGION_CANON = {
     "северо-казахстанская область": "СКО",
     "северо казахстанская область": "СКО",
     "ско": "СКО",
-
+    
     "область жетысу": "Область Жетісу",
     "область жетісу": "Область Жетісу",
     "жетысу": "Область Жетісу",
     "жетісу": "Область Жетісу",
-    "область улытау": "Область Ұлытау",
-    "область ұлытау": "Область Ұлытау",
-    "улытау": "Область Ұлытау",
 }
 
 DISTRICT_PATTERNS = [
@@ -202,7 +192,7 @@ def stem(word: str) -> str:
 
 def tokens(text: str) -> list[str]:
     t = normalize(text).replace("-", " ")
-    out: list[str] = []
+    out = []
     for w in t.split():
         if not w or w.isdigit() or w in STOP_TOKENS:
             continue
@@ -246,7 +236,7 @@ def extract_address_entities(address: str) -> dict:
     }
 
 # ===================== СУДЫ / ИНДЕКС =====================
-@dataclass(frozen=True)
+@dataclass
 class CourtRec:
     region: str
     name: str
@@ -303,10 +293,6 @@ COURTS_BY_REGION: dict[str, list[CourtRec]] = {}
 ALL_COURTS: list[CourtRec] = []
 PLACE_TO_REGION: dict[str, Counter] = {}
 
-# GUI globals
-root: tk.Tk | None = None
-status_var: tk.StringVar | None = None
-
 # ===================== РЕГИОН =====================
 def detect_region(address: str) -> str:
     parts = split_parts(address, 3)
@@ -317,7 +303,7 @@ def detect_region(address: str) -> str:
             return canon_region(reg)
 
     ent = extract_address_entities(address)
-    candidates: list[str] = []
+    candidates = []
 
     if ent["district"]:
         candidates += [stem(w) for w in tokens(ent["district"]) if stem(w)]
@@ -390,10 +376,10 @@ def detect_court(address: str, region: str) -> tuple[str, float, str | None]:
     head = normalize(address)
 
     # 0) Принудительный суд по якорю (Ордабасы и т.п.)
-    for key, (court_name, forced_region) in FORCED_COURT_BY_ANCHOR.items():
+    for key, court_name in FORCED_COURT_BY_ANCHOR.items():
         if key in head:
             # Возвращаем высокий score, чтобы всегда победило
-            return court_name, 10_000.0, canon_region(forced_region)
+            return court_name, 10_000.0, canon_region("Туркестанская область")
 
     region = canon_region(region)
     local_list = COURTS_BY_REGION.get(region, [])
@@ -433,7 +419,7 @@ def guess_address_column(df: pd.DataFrame) -> str | None:
             return lowmap[alias]
 
     best_col = None
-    best_score = -1.0
+    best_score = -1
     sample = df.head(150) if len(df) > 150 else df
 
     for c in cols:
@@ -472,15 +458,7 @@ def make_output_path(file_path: str) -> str:
     return f"{base}_courts_{ts}.xlsx"
 
 # ===================== PROCESSING =====================
-def set_status(text: str):
-    if status_var is not None:
-        status_var.set(text)
-
 def process_excel(file_path: str, address_col: str):
-    if root is None:
-        messagebox.showerror("Ошибка", "GUI не инициализирован (root is None).")
-        return
-
     df = safe_read_excel(file_path)
     if df is None:
         return
@@ -521,8 +499,15 @@ def process_excel(file_path: str, address_col: str):
     messagebox.showinfo("Готово", f"Файл сохранён:\n{out_path}")
 
 # ===================== GUI =====================
+def set_status(text: str):
+    status_var.set(text)
+
 def check_json_exists() -> bool:
-    return os.path.isfile(COURTS_JSON_PATH)
+    try:
+        with open(COURTS_JSON_PATH, "r", encoding="utf-8") as _:
+            return True
+    except Exception:
+        return False
 
 def init_courts_or_die():
     global COURTS_BY_REGION, ALL_COURTS, PLACE_TO_REGION
@@ -532,20 +517,7 @@ def init_courts_or_die():
         raise SystemExit(1)
 
     try:
-        json_path = COURTS_JSON_PATH
-        # Optional: validate/clean JSON (dedupe, normalize regions, fix Latin look-alikes)
-        if validate_and_clean_courts is not None:
-            try:
-                out_clean = str(Path(COURTS_JSON_PATH).with_suffix('')) + '_cleaned.json'
-                report = validate_and_clean_courts(COURTS_JSON_PATH, out_clean, keep="best_desc")
-                json_path = out_clean
-                # keep UI quiet; if you want a popup, uncomment:
-                # messagebox.showinfo("Справочник судов очищен", f"Записано: {out_clean}\\nДублей удалено: {report.removed_duplicates}")
-            except Exception:
-                # If cleaning fails, fall back to original file
-                json_path = COURTS_JSON_PATH
-
-        COURTS_BY_REGION, ALL_COURTS = load_courts(json_path)
+        COURTS_BY_REGION, ALL_COURTS = load_courts(COURTS_JSON_PATH)
         PLACE_TO_REGION = build_place_to_region_index(ALL_COURTS)
     except Exception as e:
         messagebox.showerror("Ошибка", f"Не удалось загрузить справочник судов:\n{e}")
@@ -566,10 +538,6 @@ def open_file():
     pick_column_window(file_path, cols, guessed)
 
 def pick_column_window(file_path: str, columns: list, guessed: str | None):
-    if root is None:
-        messagebox.showerror("Ошибка", "GUI не инициализирован (root is None).")
-        return
-
     win = tk.Toplevel(root)
     win.title("Выбор столбца адреса")
     win.geometry("560x240")
@@ -610,25 +578,23 @@ def pick_column_window(file_path: str, columns: list, guessed: str | None):
     tk.Button(btn_frame, text="Обработать", command=run, width=16, height=2).pack(side="left", padx=8)
     tk.Button(btn_frame, text="Отмена", command=win.destroy, width=16, height=2).pack(side="left", padx=8)
 
-# ===================== MAIN =====================
+# ===================== MAIN
+
 def main():
-    global root, status_var
     root = tk.Tk()
     root.title("Определение региона и суда по адресу")
     root.geometry("580x260")
     root.resizable(False, False)
 
+    global status_var
     status_var = tk.StringVar(value="Готов к работе.")
     init_courts_or_die()
 
-    info_text = (
-        "Шаги:\n"
-        "1) Нажми «Загрузить Excel с адресами»\n"
-        "2) Выбери столбец с адресами\n"
-        "3) Получишь новый Excel с колонками «Регион» и «Суд»"
+    info = tk.Label(
+        root,
+        font=("Arial", 10),
+        justify="left"
     )
-
-    info = tk.Label(root, text=info_text, font=("Arial", 10), justify="left")
     info.pack(pady=12, padx=14, anchor="w")
 
     btn = tk.Button(
@@ -645,6 +611,7 @@ def main():
     status.pack(pady=6)
 
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

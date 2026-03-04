@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -24,9 +23,7 @@ except Exception:
 
 # ---------------- НАСТРОЙКИ ----------------
 RESULT_COL = "Режим"
-
-# Рекомендуется задавать путь как относительный без "./"
-COURTS_JSON_REL = os.path.join("modules", "courts_merged.json")  # файл со списком судов (ключ "СУД")
+COURTS_JSON_FILENAME = "./modules/courts_merged.json"   # файл со списком судов (ключ "СУД")
 REGEX_CHUNK_SIZE = 200
 OCR_LANG = "rus+kaz+eng"  # если eng не нужен: "rus+kaz"
 
@@ -34,32 +31,29 @@ OCR_LANG = "rus+kaz+eng"  # если eng не нужен: "rus+kaz"
 # ---------------- TESSERACT PATH / ПРОВЕРКА ЯЗЫКОВ ----------------
 def configure_tesseract():
     """
-    Настраивает путь к tesseract.exe (особенно важно на Windows).
-    Приоритет:
-      1) переменная окружения TESSERACT_CMD
-      2) типовые пути установки на Windows
-      3) PATH (если tesseract добавлен)
+    Настраивает путь к tesseract.exe (особенно важно на Windows),
+    если пользователь задал TESSERACT_CMD — берём его.
+    Иначе пробуем типовые пути, иначе надеемся на PATH.
     """
     if not OCR_AVAILABLE:
         return
 
+    # 1) Если пользователь заранее задал путь в переменной окружения — используем
     env_cmd = os.environ.get("TESSERACT_CMD", "").strip()
     if env_cmd:
         pytesseract.pytesseract.tesseract_cmd = env_cmd
         return
 
-    # Типовые пути Windows
+    # 2) Авто-поиск по типичным путям (Windows)
     possible = [
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        # иногда ставят в LocalAppData
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+        r"C:\Users\daniyarkyzya\AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
+        r"C:\Users\daniyarkyzya\AppData\Local\Program Files (x86)\Tesseract-OCR\tesseract.exe",
     ]
     for p in possible:
-        if p and os.path.exists(p):
+        if os.path.exists(p):
             pytesseract.pytesseract.tesseract_cmd = p
             return
-    # Иначе: надеемся на PATH
+    # 3) Иначе надеемся, что tesseract есть в PATH (Linux/macOS или Windows если добавили в PATH)
 
 
 def check_tesseract_langs(required_langs: str) -> tuple[bool, str]:
@@ -84,19 +78,25 @@ def check_tesseract_langs(required_langs: str) -> tuple[bool, str]:
         return False, f"Не удалось проверить языки Tesseract: {e}"
 
 
+# попробуем сразу настроить tesseract (важно для Windows)
 if OCR_AVAILABLE:
     configure_tesseract()
 
 
 # ---------------- РЕГУЛЯРКИ ----------------
+# Арбитраж (рус/каз)
 ARB_RE = re.compile(r"\b(?:арбитраж\w*|төрелік\w*)\b", re.IGNORECASE)
+
+# Суд/сот (рус/каз) + окончания
 COURT_WORD_RE = re.compile(r"\b(?:суд|сот)\w*\b", re.IGNORECASE)
 
+# Маркеры договорной подсудности (рус/каз)
 VENUE_RE = re.compile(
     r"\b(?:договорн\w*\s+подсудн\w*|шартт\w*\s+сотт\w*)\b",
     re.IGNORECASE
 )
 
+# Быстрая отсечка: если вообще нет намёка на суд/подсудность — список судов не трогаем
 COURT_HINT_FAST_RE = re.compile(r"(суд|сот|подсудн|сотт)", re.IGNORECASE)
 
 
@@ -113,7 +113,6 @@ def normalize_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s).lower().replace("ё", "е")
-    # латинские двойники
     s = s.replace("cуд", "суд")
     s = s.replace("coт", "сот")
     s = re.sub(r"\s+", " ", s).strip()
@@ -121,11 +120,8 @@ def normalize_text(s: str) -> str:
 
 
 def resolve_courts_json_path() -> str:
-    """
-    Абсолютный путь к справочнику судов относительно папки скрипта.
-    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, COURTS_JSON_REL)
+    return os.path.join(script_dir, COURTS_JSON_FILENAME)
 
 
 def load_court_names(json_path: str) -> list[str]:
@@ -136,18 +132,13 @@ def load_court_names(json_path: str) -> list[str]:
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    if not isinstance(data, list):
-        raise ValueError("courts_merged.json должен быть массивом объектов (list).")
-
-    names: list[str] = []
+    names = []
     for item in data:
-        if not isinstance(item, dict):
-            continue
         name = item.get("СУД")
         if name:
             names.append(normalize_text(name))
 
-    # убираем дубли, сортируем длинные сначала (уменьшает ложные совпадения)
+    # убираем дубли, сортируем длинные сначала
     names = sorted({n for n in names if n}, key=len, reverse=True)
     return names
 
@@ -158,13 +149,8 @@ def build_court_regex_chunks(court_names: list[str], chunk_size: int = 200) -> l
     Ищем как подстроку, т.к. в PDF бывают переносы/знаки.
     """
     patterns: list[re.Pattern] = []
-    if not court_names:
-        return patterns
-
     for i in range(0, len(court_names), chunk_size):
         chunk = court_names[i:i + chunk_size]
-        if not chunk:
-            continue
         joined = "|".join(re.escape(x) for x in chunk)
         patterns.append(re.compile(joined, re.IGNORECASE))
     return patterns
@@ -180,7 +166,7 @@ try:
     COURT_NAMES = load_court_names(courts_path)
     COURT_PATTERNS = build_court_regex_chunks(COURT_NAMES, chunk_size=REGEX_CHUNK_SIZE)
 except Exception as e:
-    COURTS_READY_ERROR = f"Не удалось загрузить {COURTS_JSON_REL}: {e}"
+    COURTS_READY_ERROR = f"Не удалось загрузить {COURTS_JSON_FILENAME}: {e}"
 
 
 def text_contains_court_by_list(norm_text: str) -> bool:
@@ -214,9 +200,10 @@ def ocr_page_text_from_doc(doc, page_index: int) -> str:
     img_bytes = pix.tobytes("png")
     img = Image.open(io.BytesIO(img_bytes))
 
-    # лёгкая предобработка
+    # лёгкая предобработка (часто улучшает качество)
     img = img.convert("L")  # grayscale
 
+    # настройки tesseract
     config = "--oem 3 --psm 6"
     txt = pytesseract.image_to_string(img, lang=OCR_LANG, config=config)
     return txt or ""
@@ -231,7 +218,7 @@ def looks_like_garbage(norm_txt: str) -> bool:
     if not norm_txt:
         return True
     letters = sum(ch.isalpha() for ch in norm_txt)
-    return letters < 10
+    return letters < 10  # можно подкрутить порог (например 20)
 
 
 def pdf_iter_page_text(pdf_path: str, use_ocr_for_scans: bool) -> list[str]:
@@ -242,19 +229,15 @@ def pdf_iter_page_text(pdf_path: str, use_ocr_for_scans: bool) -> list[str]:
     """
     texts: list[str] = []
 
-    doc = None
-    if use_ocr_for_scans and OCR_AVAILABLE:
-        try:
-            doc = fitz.open(pdf_path)
-        except Exception:
-            doc = None  # OCR просто будет недоступен для этого файла
-
+    # Откроем fitz doc один раз (быстрее и стабильнее)
+    doc = fitz.open(pdf_path) if (use_ocr_for_scans and OCR_AVAILABLE) else None
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for i, page in enumerate(pdf.pages):
                 txt = page.extract_text() or ""
                 norm_txt = normalize_text(txt)
 
+                # Если это "пусто" или "мусор" — OCR
                 if looks_like_garbage(norm_txt):
                     if use_ocr_for_scans and OCR_AVAILABLE and doc is not None:
                         ocr_txt = ocr_page_text_from_doc(doc, i)
@@ -265,10 +248,7 @@ def pdf_iter_page_text(pdf_path: str, use_ocr_for_scans: bool) -> list[str]:
                     texts.append(txt)
     finally:
         if doc is not None:
-            try:
-                doc.close()
-            except Exception:
-                pass
+            doc.close()
 
     return texts
 
@@ -277,7 +257,7 @@ def pdf_iter_page_text(pdf_path: str, use_ocr_for_scans: bool) -> list[str]:
 def pdf_mode(pdf_path: str, use_ocr_for_scans: bool) -> str:
     """
     Для НЕ-банка:
-    - если где-то в PDF есть Арбитраж/Төрелік -> "Арбитраж" (приоритет)
+    - если где-то в PDF есть Арбитраж/Төрелік -> "Арбитраж" (даже если есть суд/подсудность)
     - иначе если есть:
         a) договорная подсудность / шарттық соттылық, ИЛИ
         b) суд/сот, ИЛИ
@@ -296,13 +276,16 @@ def pdf_mode(pdf_path: str, use_ocr_for_scans: bool) -> str:
 
         norm = normalize_text(txt)
 
+        # 1) Арбитраж — приоритет
         if ARB_RE.search(norm):
             has_arbitrage = True
 
+        # 2) Договорная подсудность — достаточно любого признака
         if not has_contract_venue:
             if VENUE_RE.search(norm) or COURT_WORD_RE.search(norm):
                 has_contract_venue = True
             else:
+                # 3) Точный список судов (если загрузился)
                 if (COURTS_READY_ERROR is None) and text_contains_court_by_list(norm):
                     has_contract_venue = True
 
@@ -320,6 +303,8 @@ def process_excel(input_xlsx: str, output_xlsx: str, log_fn, progress_fn, use_oc
     """
     df = pd.read_excel(input_xlsx)
 
+    # Колонки по позиции:
+    # 1-я = ВНД, 2-я = Кредитор, 3-я = Путь к договору
     if df.shape[1] < 3:
         raise ValueError("В Excel должно быть минимум 3 столбца по порядку: ВНД | Кредитор | Путь к договору.")
 
@@ -335,7 +320,7 @@ def process_excel(input_xlsx: str, output_xlsx: str, log_fn, progress_fn, use_oc
             f"Будем искать по 'суд/сот' и маркерам подсудности."
         )
     else:
-        log_fn(f"Список судов загружен: {len(COURT_NAMES)} шт. ({COURTS_JSON_REL})")
+        log_fn(f"Список судов загружен: {len(COURT_NAMES)} шт. ({COURTS_JSON_FILENAME})")
 
     if use_ocr_for_scans:
         if not OCR_AVAILABLE:
@@ -345,9 +330,14 @@ def process_excel(input_xlsx: str, output_xlsx: str, log_fn, progress_fn, use_oc
             ok, msg = check_tesseract_langs(OCR_LANG)
             log_fn(msg)
             if not ok:
-                log_fn("ВНИМАНИЕ: не хватает языков Tesseract. Поставь языки (rus/kaz/eng) или поменяй OCR_LANG.")
+                log_fn(
+                    "ВНИМАНИЕ: не хватает языков Tesseract. "
+                    "Поставь языки (rus/kaz/eng) или поменяй OCR_LANG."
+                )
 
     total = len(df)
+
+    # стартовый прогресс
     progress_fn(0, 0, total, total)
 
     for idx, row in df.iterrows():
@@ -359,6 +349,7 @@ def process_excel(input_xlsx: str, output_xlsx: str, log_fn, progress_fn, use_oc
         percent = int(done / max(total, 1) * 100)
         progress_fn(percent, done, left, total)
 
+        # Банк => "Общеустановленная"
         if "банк" in creditor_raw:
             df.at[idx, RESULT_COL] = "Общеустановленная"
         else:
@@ -388,7 +379,7 @@ class App(tk.Tk):
         self.resizable(False, False)
 
         self.file_path = tk.StringVar(value="")
-        self.use_ocr = tk.BooleanVar(value=True)
+        self.use_ocr = tk.BooleanVar(value=True)  # по умолчанию включим OCR
         self.lang_hint = tk.StringVar(value=OCR_LANG)
 
         frm = ttk.Frame(self, padding=12)
@@ -425,6 +416,7 @@ class App(tk.Tk):
         self.progress = ttk.Progressbar(btn_row, orient="horizontal", length=520, mode="determinate")
         self.progress.pack(side="left", padx=12)
 
+        # --- СЧЁТЧИК ---
         self.counter_var = tk.StringVar(value="Обработано: 0/0 | Осталось: 0")
         self.counter_lbl = ttk.Label(btn_row, textvariable=self.counter_var)
         self.counter_lbl.pack(side="left")
@@ -441,7 +433,7 @@ class App(tk.Tk):
             self.append_log("ВНИМАНИЕ: список судов не загружен.")
             self.append_log(COURTS_READY_ERROR)
         else:
-            self.append_log(f"Суды загружены: {len(COURT_NAMES)} шт. ({COURTS_JSON_REL})")
+            self.append_log(f"Суды загружены: {len(COURT_NAMES)} шт. ({COURTS_JSON_FILENAME})")
 
         if self.use_ocr.get():
             if OCR_AVAILABLE:
@@ -450,10 +442,12 @@ class App(tk.Tk):
                 self.append_log(msg)
                 if not ok:
                     self.append_log(
-                        "Подсказка: установи Tesseract и языки rus/kaz/eng "
+                        "Подсказка: на Windows поставь Tesseract (UB Mannheim) и отметь языки rus/kaz/eng, "
                         "или задай путь через переменную окружения TESSERACT_CMD."
                     )
-                self.append_log(f"Tesseract cmd: {getattr(pytesseract.pytesseract, 'tesseract_cmd', 'PATH')}")
+                self.append_log(
+                    f"Tesseract cmd: {getattr(pytesseract.pytesseract, 'tesseract_cmd', 'PATH')}"
+                )
             else:
                 self.append_log("OCR НЕ доступен: установи pytesseract + pymupdf + pillow и Tesseract OCR (rus/kaz/eng).")
 
@@ -504,14 +498,13 @@ class App(tk.Tk):
                     ),
                     use_ocr_for_scans=use_ocr_for_scans
                 )
-                # ВАЖНО: configure вызываем с kwargs, не с dict позиционно
-                self.after(0, self.status.configure, text="Готово ✅")
+                self.after(0, self.status.configure, {"text": "Готово ✅"})
                 self.after(0, messagebox.showinfo, "Готово", f"Сохранено:\n{output_xlsx}")
             except Exception as e:
-                self.after(0, self.status.configure, text="Ошибка ❌")
+                self.after(0, self.status.configure, {"text": "Ошибка ❌"})
                 self.after(0, messagebox.showerror, "Ошибка", str(e))
             finally:
-                self.after(0, self.run_btn.configure, state="normal")
+                self.after(0, self.run_btn.configure, {"state": "normal"})
 
         threading.Thread(target=worker, daemon=True).start()
 

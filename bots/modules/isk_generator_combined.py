@@ -1,7 +1,19 @@
+# -*- coding: utf-8 -*-
 """
+Иски-бот: берет данные из Excel, подставляет в Word-шаблон, формирует пачку исков.
+
+Доработки:
+- Создаёт подпапку для результатов с названием Excel-файла (без расширения).
+  Например: Данные.xlsx -> .../Данные/ (туда сохраняются иски + Реестр_исков.xlsx)
+
+- Исправление: общий текст "По всем вышеуказанным договорам..." НЕ удаляется
+  при сокращении количества ответчиков (<10). Границу удаления секций договоров
+  ограничиваем ДО этого общего блока.
+
 Зависимости:
     pip install pandas openpyxl python-docx
 """
+
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,98 +67,17 @@ def enforce_times_new_roman_12(doc: Document) -> None:
 # ---------------- ОБЩИЕ УТИЛИТЫ ----------------
 
 def normalize_key(col_name: str) -> str:
-    # ВАЖНО: placeholder должен совпадать с названием колонки (плюс суффикс)
     s = str(col_name).strip()
     s = re.sub(r"\s+", "_", s)
     return s
 
 
-def _digits(s: str) -> str:
-    return re.sub(r"\D+", "", s or "")
-
-
-def normalize_phone(v: str) -> str:
-    """
-    Приводит телефон к формату +7XXXXXXXXXX.
-    Поддержка типичных вариантов:
-      - 8XXXXXXXXXX -> +7XXXXXXXXXX
-      - 7XXXXXXXXXX -> +7XXXXXXXXXX
-      - +7XXXXXXXXXX -> +7XXXXXXXXXX
-      - 10 цифр -> +7XXXXXXXXXX
-    Если не похоже на телефон — возвращает исходное.
-    """
-    raw = (v or "").strip()
-    if not raw:
+def safe_str(v) -> str:
+    if pd.isna(v):
         return ""
-
-    d = _digits(raw)
-    if not d:
-        return raw
-
-    # Казахстан/РФ номера часто 11 цифр
-    if len(d) == 11:
-        if d.startswith("8"):
-            d = "7" + d[1:]
-        if d.startswith("7"):
-            return "+7" + d[1:]
-        return "+" + d
-
-    # 10 цифр без кода страны
-    if len(d) == 10:
-        return "+7" + d
-
-    return raw
-
-
-def normalize_iin(v: str) -> str:
-    """
-    ИИН в РК — 12 цифр. Если в ячейке только цифры и длина <=12,
-    дополним нулями слева. Если не цифры — вернём как есть.
-    """
-    raw = (v or "").strip()
-    if not raw:
-        return ""
-    d = _digits(raw)
-    if d and len(d) <= 12:
-        return d.zfill(12)
-    return raw
-
-
-def safe_str(v, field_name: str = "") -> str:
-    """
-    Преобразование значения из DataFrame в строку без потери значимых нулей.
-
-    ВАЖНО: Мы читаем Excel dtype=str, поэтому сюда обычно уже приходит str.
-    Но оставляем защиту на случай, если кто-то изменит чтение.
-    """
-    if v is None:
-        return ""
-    try:
-        if pd.isna(v):
-            return ""
-    except Exception:
-        pass
-
-    # Числа (если вдруг)
-    if isinstance(v, float):
-        if v.is_integer():
-            v = str(int(v))
-        else:
-            v = str(v)
-    elif isinstance(v, int):
-        v = str(v)
-    else:
-        v = str(v)
-
-    v = v.strip()
-
-    low = field_name.lower()
-    if low in ("иин", "инн") or "иин" in low or "инн" in low:
-        return normalize_iin(v)
-    if "тел" in low or "phone" in low:
-        return normalize_phone(v)
-
-    return v
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
 
 
 def iter_paragraphs(doc: Document):
@@ -170,6 +101,8 @@ def replace_placeholders_in_paragraph(paragraph: Paragraph, mapping: Dict[str, s
 
     new_txt = PLACEHOLDER_RE.sub(repl, txt)
     if new_txt != txt:
+        # Важно: paragraph.text = ... создаёт один run (упрощает форматирование),
+        # но для вашего шаблона это ок, а шрифт мы всё равно фиксируем в конце.
         paragraph.text = new_txt
 
 
@@ -196,17 +129,6 @@ def _sanitize_filename(s: str) -> str:
     return s
 
 
-def _uniquify(path: Path) -> Path:
-    if not path.exists():
-        return path
-    i = 2
-    while True:
-        p = path.with_stem(f"{path.stem} ({i})")
-        if not p.exists():
-            return p
-        i += 1
-
-
 # ---------------- ПОИСК ГРАНИЦ БЛОКОВ ----------------
 
 def _find_prosu_sud_index(doc: Document) -> Optional[int]:
@@ -218,6 +140,10 @@ def _find_prosu_sud_index(doc: Document) -> Optional[int]:
 
 
 def _find_common_block_index(doc: Document) -> Optional[int]:
+    """
+    Находим начало общего текста, который должен ОСТАТЬСЯ:
+    "По всем вышеуказанным договорам ..."
+    """
     for i, p in enumerate(doc.paragraphs):
         t = (p.text or "").strip().lower()
         if "по всем вышеуказанным договорам" in t:
@@ -226,6 +152,11 @@ def _find_common_block_index(doc: Document) -> Optional[int]:
 
 
 def _limit_for_defendant_sections(doc: Document) -> int:
+    """
+    Верхняя граница, до которой могут жить/удаляться договорные секции.
+    Мы НЕ должны удалять общий блок ("По всем вышеуказанным договорам...") :contentReference[oaicite:2]{index=2}
+    и тем более не должны залезать в "Прошу суд".
+    """
     prosu = _find_prosu_sud_index(doc)
     common = _find_common_block_index(doc)
 
@@ -234,10 +165,15 @@ def _limit_for_defendant_sections(doc: Document) -> int:
         limit = min(limit, prosu)
     if common is not None:
         limit = min(limit, common)
+
     return limit
 
 
 def find_defendant_section_ranges(doc: Document) -> List[Tuple[int, int, int]]:
+    """
+    Находим диапазоны параграфов, соответствующие каждому ответчику (0..9),
+    но только в "договорной" части, НЕ включая общий блок и НЕ включая "Прошу суд".
+    """
     limit = _limit_for_defendant_sections(doc)
 
     starts: List[Tuple[int, int]] = []
@@ -284,6 +220,12 @@ def _is_vzyskat_paragraph(p: Paragraph) -> bool:
 
 
 def prune_unused_defendants(doc: Document, present: List[bool]) -> None:
+    """
+    Удаляет:
+      - строки таблицы ОтветчикX для отсутствующих
+      - секции договоров для отсутствующих (но НЕ трогает общий блок "По всем вышеуказанным договорам...") :contentReference[oaicite:3]{index=3}
+      - пункты "Взыскать с ..." для отсутствующих
+    """
     present = (present + [False] * 10)[:10]
 
     # 1) Таблица ответчиков (обычно первая)
@@ -306,6 +248,7 @@ def prune_unused_defendants(doc: Document, present: List[bool]) -> None:
     ranges = find_defendant_section_ranges(doc)
     to_delete = [r for r in ranges if 0 <= r[0] <= 9 and not present[r[0]]]
 
+    # удаляем параграфы с конца
     paras = list(doc.paragraphs)
     for _, start, end in sorted(to_delete, key=lambda x: x[1], reverse=True):
         for p in paras[start:end][::-1]:
@@ -333,98 +276,86 @@ def build_mapping(rows: pd.DataFrame) -> Dict[str, str]:
         suf = "" if i == 0 else str(i)
         for col in rows.columns:
             key = normalize_key(col) + suf
-            mapping[key] = safe_str(r[col], field_name=str(col))
+            mapping[key] = safe_str(r[col])
     return mapping
 
 
-def make_output_name(rows: pd.DataFrame, group_index: int, part_no: int = 1, parts_total: int = 1) -> str:
-    desired = safe_str(rows.iloc[0].get("Иск", ""), field_name="Иск")
+def make_output_name(rows: pd.DataFrame, group_index: int) -> str:
+    # имя по столбцу "Иск" у первого ответчика
+    desired = safe_str(rows.iloc[0].get("Иск", ""))
     desired = _sanitize_filename(desired)
 
-    suffix = ""
-    if parts_total > 1:
-        suffix = f" (часть {part_no} из {parts_total})"
-
     if desired:
-        if desired.lower().endswith(".docx"):
-            base = desired[:-5]
-            return base + suffix + ".docx"
-        return desired + suffix + ".docx"
+        return desired if desired.lower().endswith(".docx") else desired + ".docx"
 
-    fio = safe_str(rows.iloc[0].get("ФИО", ""), field_name="ФИО") or f"Группа_{group_index}"
-    vnd = safe_str(rows.iloc[0].get("ВНД", ""), field_name="ВНД")
+    # fallback
+    fio = safe_str(rows.iloc[0].get("ФИО", "")) or f"Группа_{group_index}"
+    vnd = safe_str(rows.iloc[0].get("ВНД", ""))
     vnd = re.sub(r"[^\w\-]+", "_", vnd)[:20]
     fio_clean = _sanitize_filename(fio)[:60].strip("_")
     parts = [f"{group_index:03d}", fio_clean]
     if vnd:
         parts.append(vnd)
-    return "Иск_" + "_".join([p for p in parts if p]) + suffix + ".docx"
-
-
-def _iter_claim_groups(df: pd.DataFrame):
-    if "Иск" in df.columns:
-        for isk_val, gdf in df.groupby("Иск", sort=False):
-            gdf = gdf.copy()
-            parts_total = (len(gdf) + 9) // 10
-            for part_no in range(parts_total):
-                sub = gdf.iloc[part_no * 10:(part_no + 1) * 10].copy()
-                yield isk_val, part_no + 1, parts_total, sub
-    else:
-        parts_total = (len(df) + 9) // 10
-        for part_no in range(parts_total):
-            sub = df.iloc[part_no * 10:(part_no + 1) * 10].copy()
-            yield "", part_no + 1, parts_total, sub
+    return "Иск_" + "_".join([p for p in parts if p]) + ".docx"
 
 
 def generate_claims(inputs: Inputs) -> int:
-    df = pd.read_excel(inputs.excel_path, dtype=str, keep_default_na=False)
+    df = pd.read_excel(inputs.excel_path)
     if df.empty:
         raise ValueError("Excel пустой — нечего формировать.")
 
+    # --- создаём подпапку по названию Excel-файла ---
     excel_folder_name = _sanitize_filename(inputs.excel_path.stem) or "Иски"
     out_dir = inputs.out_dir / excel_folder_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Реестр: новые столбцы ---
     if "ВНД с чем объединены" not in df.columns:
         df["ВНД с чем объединены"] = ""
     if "Файл_иска" not in df.columns:
         df["Файл_иска"] = ""
 
-    total_docs = 0
+    total = 0
     group_index = 1
 
-    for isk_val, part_no, parts_total, chunk in _iter_claim_groups(df):
-        if chunk.empty:
-            continue
-
+    for start in range(0, len(df), 10):
+        chunk = df.iloc[start:start + 10].copy()
         chunk_index = chunk.index
 
         doc = Document(inputs.template_path)
         mapping = build_mapping(chunk)
 
+        # 1) Подстановка
         replace_all(doc, mapping)
 
+        # 2) Удаляем пустых ответчиков/секции/пункты "Взыскать с"
         present = build_present_mask(mapping)
         if not all(present):
             prune_unused_defendants(doc, present)
 
-        out_name = make_output_name(chunk, group_index, part_no=part_no, parts_total=parts_total)
-        out_path = _uniquify(out_dir / out_name)
+        # 3) Имя файла иска — по столбцу "Иск" 1-го ответчика
+        out_name = make_output_name(chunk, group_index)
+        out_path = out_dir / out_name
 
+        # 4) Шрифт
         enforce_times_new_roman_12(doc)
+
+        # 5) Сохранение
         doc.save(out_path)
 
-        first_vnd = safe_str(chunk.iloc[0].get("ВНД", ""), field_name="ВНД")
+        # 6) Реестр
+        first_vnd = safe_str(chunk.iloc[0].get("ВНД", ""))
         df.loc[chunk_index, "ВНД с чем объединены"] = first_vnd
-        df.loc[chunk_index, "Файл_иска"] = out_path.name
+        df.loc[chunk_index, "Файл_иска"] = out_name
 
-        total_docs += 1
+        total += 1
         group_index += 1
 
+    # сохраняем реестр внутрь созданной подпапки
     registry_path = out_dir / "Реестр_исков.xlsx"
     df.to_excel(registry_path, index=False)
 
-    return total_docs
+    return total
 
 
 # ---------------- GUI ----------------
